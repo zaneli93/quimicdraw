@@ -1,15 +1,34 @@
 'use client';
 
-import { use, useEffect, useRef, useState, useCallback } from 'react';
+import { use, useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { motion, AnimatePresence } from 'motion/react';
-import { Pencil, Eraser, Trash2, MessageSquare, X } from 'lucide-react';
+import { Pencil, Eraser, Trash2, MessageSquare, X, Search, ChevronDown, ChevronUp } from 'lucide-react';
 import stringSimilarity from 'string-similarity';
 
 import hydrocarbons from '@/data/hydrocarbons.json';
 import { useIsMobile } from '@/hooks/use-mobile';
 import { useGameStore } from '@/store/gameStore';
 
+// ── Type labels and ordering ─────────────────────────────────────────────────
+const TYPE_LABELS: Record<string, string> = {
+  alcano: 'Alcanos',
+  alceno: 'Alcenos',
+  alcino: 'Alcinos',
+  cicloalcano: 'Cicloalcanos',
+  cicloalceno: 'Cicloalcenos',
+  aromatico: 'Aromáticos',
+  dieno: 'Dienos',
+};
+const TYPE_ORDER = ['alcano', 'alceno', 'alcino', 'cicloalcano', 'cicloalceno', 'dieno', 'aromatico'];
+
+const hydrocardonsByType = TYPE_ORDER.reduce((acc, type) => {
+  const items = hydrocarbons.filter((h) => h.type === type);
+  if (items.length) acc[type] = items;
+  return acc;
+}, {} as Record<string, typeof hydrocarbons>);
+
+// ── Types ────────────────────────────────────────────────────────────────────
 type Hydrocarbon = {
   name: string;
   smiles: string;
@@ -24,10 +43,16 @@ type ChatMessage = {
   isCorrect?: boolean;
 };
 
+// ── SMILES renderer ──────────────────────────────────────────────────────────
 const PREVIEW_CANVAS_ID = 'molecule-preview-canvas';
 
-// Renders a SMILES molecule into the given SVG element
-function renderMolecule(svg: SVGSVGElement, smiles: string, onError: (msg: string) => void) {
+function renderMolecule(
+  svg: SVGSVGElement,
+  smiles: string,
+  onError: (msg: string) => void,
+  width = 180,
+  height = 130,
+) {
   svg.innerHTML = '';
   import('smiles-drawer')
     .then((module) => {
@@ -35,12 +60,84 @@ function renderMolecule(svg: SVGSVGElement, smiles: string, onError: (msg: strin
         (module as any).SmiDrawer || (module as any).Drawer || (module as any).default;
       if (!SmilesDrawer) throw new Error('smiles-drawer indisponivel');
       svg.innerHTML = '';
-      const drawer = new SmilesDrawer({ width: 180, height: 130, compactDrawing: true });
-      drawer.draw(smiles, `#${PREVIEW_CANVAS_ID}`, 'light', false);
+      const drawer = new SmilesDrawer({ width, height, compactDrawing: true });
+      drawer.draw(smiles, `#${svg.id}`, 'light', false);
     })
     .catch(() => onError('Não foi possível renderizar essa estrutura.'));
 }
 
+// ── Inline SVG card for each molecule in the list ────────────────────────────
+function MoleculeCard({
+  mol,
+  isSelected,
+  onSelect,
+  onHover,
+}: {
+  mol: Hydrocarbon;
+  isSelected: boolean;
+  onSelect: () => void;
+  onHover: () => void;
+}) {
+  const svgRef = useRef<SVGSVGElement>(null);
+  const idRef = useRef(`mol-svg-${mol.name.replace(/[^a-zA-Z0-9]/g, '-')}`);
+  const [rendered, setRendered] = useState(false);
+  const [error, setError] = useState(false);
+
+  // Render molecule when card becomes visible (intersection observer)
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting && !rendered) {
+          setRendered(true);
+          renderMolecule(el, mol.smiles, () => setError(true), 120, 90);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: '100px' },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [mol.smiles, rendered]);
+
+  return (
+    <button
+      onMouseEnter={onHover}
+      onTouchStart={onHover}
+      onClick={onSelect}
+      className={`w-full text-left rounded-xl border transition-all overflow-hidden ${
+        isSelected
+          ? 'border-indigo-400 bg-indigo-50 ring-2 ring-indigo-200'
+          : 'border-slate-200 bg-white hover:border-indigo-300 hover:bg-indigo-50/50'
+      }`}
+    >
+      {/* Molecule SVG preview */}
+      <div className="bg-slate-50 flex items-center justify-center p-1 border-b border-slate-100">
+        {error ? (
+          <div className="h-[72px] flex items-center justify-center text-[9px] text-slate-400 px-2 text-center">
+            {mol.smiles}
+          </div>
+        ) : (
+          <svg
+            id={idRef.current}
+            ref={svgRef}
+            width={120}
+            height={80}
+            className="w-full h-[72px]"
+          />
+        )}
+      </div>
+      {/* Name */}
+      <div className="px-2 py-1.5">
+        <span className="font-semibold text-[12px] text-slate-800 block leading-tight">{mol.name}</span>
+        <span className="text-[10px] text-slate-400">C{mol.carbons}</span>
+      </div>
+    </button>
+  );
+}
+
+// ── Main component ───────────────────────────────────────────────────────────
 export default function RoomPage({ params }: { params: Promise<{ id: string }> }) {
   const searchParams = useSearchParams();
   const { id: roomId } = use(params);
@@ -56,51 +153,65 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
 
   const isMobile = useIsMobile();
 
+  // ── Join state ───────────────────────────────────────────────────────────
   const [joinNameInput, setJoinNameInput] = useState(initialName);
   const [playerName, setPlayerName] = useState(initialName);
   const [hasJoined, setHasJoined] = useState(Boolean(initialName));
   const [joinError, setJoinError] = useState('');
 
+  // ── Chat state ───────────────────────────────────────────────────────────
   const [chatOpen, setChatOpen] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-
   const [guessInput, setGuessInput] = useState('');
   const [suggestions, setSuggestions] = useState<Hydrocarbon[]>([]);
-  const [wordSearch, setWordSearch] = useState('');
-  const [wordSuggestions, setWordSuggestions] = useState<Hydrocarbon[]>([]);
 
+  // ── Molecule list picker state ───────────────────────────────────────────
+  const [listSearch, setListSearch] = useState('');
+  const [hoveredMol, setHoveredMol] = useState<Hydrocarbon | null>(null);
+  const [selectedMol, setSelectedMol] = useState<Hydrocarbon | null>(null);
+  // Which type groups are collapsed
+  const [collapsedTypes, setCollapsedTypes] = useState<Record<string, boolean>>({});
+  // Side preview refs
+  const sidePreviewRef = useRef<SVGSVGElement>(null);
+  const [sidePreviewError, setSidePreviewError] = useState(false);
+
+  // ── Drawing state ────────────────────────────────────────────────────────
   const [timeLeft, setTimeLeft] = useState(0);
   const [isDrawing, setIsDrawing] = useState(false);
   const [color, setColor] = useState('#000000');
   const [lineWidth, setLineWidth] = useState(5);
   const [tool, setTool] = useState<'pen' | 'eraser'>('pen');
 
-  // previewWord: molecule shown in the preview panel
+  // ── Molecule preview (while drawing) ─────────────────────────────────────
   const [previewWord, setPreviewWord] = useState<Hydrocarbon | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
 
+  // ── Refs ─────────────────────────────────────────────────────────────────
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const previewCanvasRef = useRef<SVGSVGElement>(null);
   const lastPos = useRef<{ x: number; y: number } | null>(null);
   const chatOpenRef = useRef(chatOpen);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  // ── Sync chat open ref ────────────────────────────────────────────────────
   useEffect(() => {
     chatOpenRef.current = chatOpen;
     if (chatOpen) setUnreadCount(0);
   }, [chatOpen]);
 
-  // Auto-scroll chat
+  // ── Auto-scroll chat ──────────────────────────────────────────────────────
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  // ── Connect on join ───────────────────────────────────────────────────────
   useEffect(() => {
     if (!hasJoined || !playerName) return;
     connect(roomId, playerName, false);
   }, [hasJoined, playerName, roomId, connect]);
 
+  // ── Socket events ─────────────────────────────────────────────────────────
   useEffect(() => {
     if (!socket) return;
 
@@ -184,7 +295,7 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
     };
   }, [socket]);
 
-  // Timer countdown
+  // ── Timer countdown ───────────────────────────────────────────────────────
   useEffect(() => {
     if (roomState?.state !== 'playing' || !roomState.roundEndTime) {
       setTimeLeft(0);
@@ -198,7 +309,7 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
     return () => clearInterval(interval);
   }, [roomState?.state, roomState?.roundEndTime]);
 
-  // ── FIX: keep previewWord in sync with currentWord at all times ──
+  // ── Keep previewWord in sync with currentWord ─────────────────────────────
   useEffect(() => {
     if (roomState?.currentWord) {
       setPreviewWord(roomState.currentWord as Hydrocarbon);
@@ -206,17 +317,26 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
     }
   }, [roomState?.currentWord]);
 
-  // Reset on new round (choosing_word phase)
+  // ── Reset list picker on new round ────────────────────────────────────────
   useEffect(() => {
     if (roomState?.state === 'choosing_word') {
-      setWordSearch('');
-      setWordSuggestions([]);
-      // Don't clear previewWord here — keep last molecule until drawer picks new one
-      setPreviewError('Busque uma molécula para visualizar a estrutura.');
+      setListSearch('');
+      setHoveredMol(null);
+      setSelectedMol(null);
+      setSidePreviewError(false);
+      setCollapsedTypes({});
     }
   }, [roomState?.state, roomState?.currentRound]);
 
-  // Canvas resize observer
+  // ── Render side preview when hovered molecule changes ────────────────────
+  useEffect(() => {
+    const target = hoveredMol;
+    if (!sidePreviewRef.current || !target) return;
+    setSidePreviewError(false);
+    renderMolecule(sidePreviewRef.current, target.smiles, () => setSidePreviewError(true), 160, 120);
+  }, [hoveredMol]);
+
+  // ── Canvas resize observer ────────────────────────────────────────────────
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !canvas.parentElement) return;
@@ -238,42 +358,40 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
     return () => observer.disconnect();
   }, []);
 
+  // ── Render molecule in the playing-state preview panel ────────────────────
+  useEffect(() => {
+    const isDrawer = roomState?.currentDrawer === socket?.id;
+    const shouldShow =
+      Boolean(isDrawer) &&
+      Boolean(previewWord) &&
+      (roomState?.state === 'choosing_word' || roomState?.state === 'playing');
+    if (!shouldShow || !previewCanvasRef.current || !previewWord) return;
+    renderMolecule(previewCanvasRef.current, previewWord.smiles, setPreviewError);
+  }, [previewWord, roomState?.state, roomState?.currentDrawer, socket?.id]);
+
+  // ── Derived values ────────────────────────────────────────────────────────
   const isDrawer = roomState?.currentDrawer === socket?.id;
-
-  // ── FIX: preview is visible whenever drawer has a molecule selected,
-  //    regardless of state (choosing_word OR playing) ──
-  const shouldShowPreview = Boolean(isDrawer) && Boolean(previewWord) &&
+  const shouldShowPreview =
+    Boolean(isDrawer) &&
+    Boolean(previewWord) &&
     (roomState?.state === 'choosing_word' || roomState?.state === 'playing');
-
-  // ── FIX: always use previewWord (kept in sync with currentWord above) ──
   const previewTarget = previewWord;
 
-  // Render molecule preview whenever previewTarget changes
-  useEffect(() => {
-    if (!shouldShowPreview || !previewCanvasRef.current || !previewTarget) return;
-    renderMolecule(previewCanvasRef.current, previewTarget.smiles, setPreviewError);
-  }, [shouldShowPreview, previewTarget]);
-
-  const handleWordSearch = (text: string) => {
-    setWordSearch(text);
-    if (text.length <= 1) {
-      setWordSuggestions([]);
-      return;
+  // ── Filtered molecule list ────────────────────────────────────────────────
+  const filteredByType = useMemo(() => {
+    const q = listSearch.toLowerCase().trim();
+    if (!q) return hydrocardonsByType;
+    const result: Record<string, typeof hydrocarbons> = {};
+    for (const type of TYPE_ORDER) {
+      const items = (hydrocardonsByType[type] ?? []).filter((h) =>
+        h.name.toLowerCase().includes(q),
+      );
+      if (items.length) result[type] = items;
     }
-    const matches = stringSimilarity.findBestMatch(
-      text.toLowerCase(),
-      hydrocarbons.map((h) => h.name.toLowerCase()),
-    );
-    const bestMatches = matches.ratings
-      .filter((r) => r.rating > 0.3)
-      .sort((a, b) => b.rating - a.rating)
-      .slice(0, 6)
-      .map((r) => hydrocarbons.find((h) => h.name.toLowerCase() === r.target))
-      .filter((e): e is Hydrocarbon => Boolean(e));
-    setWordSuggestions(bestMatches);
-    if (bestMatches.length > 0) setPreviewWord(bestMatches[0]);
-  };
+    return result;
+  }, [listSearch]);
 
+  // ── Guess input with fuzzy search ─────────────────────────────────────────
   const handleGuessSearch = (text: string) => {
     setGuessInput(text);
     if (text.length <= 1) {
@@ -293,12 +411,15 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
     setSuggestions(bestMatches);
   };
 
-  // ── MOBILE FIX: selecting a suggestion sends the guess immediately ──
-  const submitGuessFromSuggestion = useCallback((name: string) => {
-    guess(name);
-    setGuessInput('');
-    setSuggestions([]);
-  }, [guess]);
+  // ── Mobile: tapping a suggestion sends the guess immediately ─────────────
+  const submitGuessFromSuggestion = useCallback(
+    (name: string) => {
+      guess(name);
+      setGuessInput('');
+      setSuggestions([]);
+    },
+    [guess],
+  );
 
   const sendGuess = (e: React.FormEvent) => {
     e.preventDefault();
@@ -308,6 +429,7 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
     setSuggestions([]);
   };
 
+  // ── Drawing helpers ───────────────────────────────────────────────────────
   const getPos = (e: React.MouseEvent | React.TouchEvent) => {
     const canvas = canvasRef.current;
     if (!canvas) return { x: 0, y: 0 };
@@ -379,7 +501,13 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
     setHasJoined(true);
   };
 
-  // ─── Join screen ───────────────────────────────────────────────────────────
+  // ── Toggle type group collapse ────────────────────────────────────────────
+  const toggleType = (type: string) => {
+    setCollapsedTypes((prev) => ({ ...prev, [type]: !prev[type] }));
+  };
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ─── Join screen ──────────────────────────────────────────────────────────
   if (!hasJoined) {
     return (
       <main className="min-h-screen bg-slate-50 px-4 py-10 flex items-center justify-center">
@@ -439,10 +567,11 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
   const ranking = [...(roomState.players ?? [])].sort((a: any, b: any) => b.score - a.score);
   const showChatPanel = !isMobile || chatOpen;
 
+  // ═══════════════════════════════════════════════════════════════════════════
   // ─── Main game screen ──────────────────────────────────────────────────────
   return (
     <div className="flex flex-col h-[100dvh] bg-slate-50 overflow-hidden relative">
-      {/* Header */}
+      {/* ── Header ─────────────────────────────────────────────────────────── */}
       <header className="bg-white shadow-sm h-14 flex items-center justify-between px-3 sm:px-4 z-20 shrink-0 border-b border-slate-200">
         <div className="flex items-center gap-2 sm:gap-4 min-w-0">
           <h1 className="font-bold text-indigo-600 text-lg hidden sm:block">QuimicDraw</h1>
@@ -472,6 +601,7 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
         </div>
       </header>
 
+      {/* ── Main area ──────────────────────────────────────────────────────── */}
       <main className="flex-1 relative flex overflow-hidden">
         {/* Canvas area */}
         <div
@@ -487,7 +617,7 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
         >
           <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />
 
-          {/* ── Molecule preview panel (always visible while drawer has a word) ── */}
+          {/* ── Molecule reference panel (visible while drawer draws) ─────── */}
           {shouldShowPreview && previewTarget && (
             <section className="absolute top-3 left-3 z-20 w-[180px] sm:w-[210px] rounded-2xl border border-slate-200 bg-white/97 backdrop-blur shadow-lg p-3">
               <p className="text-[10px] font-semibold uppercase tracking-wide text-indigo-600 mb-1">
@@ -497,7 +627,7 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
                 {previewTarget.name}
               </p>
               <p className="text-[11px] text-slate-500 mb-2">
-                {previewTarget.type} · C{previewTarget.carbons}
+                {TYPE_LABELS[previewTarget.type] ?? previewTarget.type} · C{previewTarget.carbons}
               </p>
               <div className="rounded-lg bg-slate-50 border border-slate-100 p-1">
                 <svg
@@ -516,7 +646,7 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
             </section>
           )}
 
-          {/* Waiting overlay */}
+          {/* ── Waiting overlay ──────────────────────────────────────────── */}
           {roomState.state === 'waiting' && (
             <div className="absolute inset-0 bg-white/80 backdrop-blur-sm flex items-center justify-center z-10">
               <div className="text-center px-6">
@@ -526,61 +656,147 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
             </div>
           )}
 
-          {/* Choosing word overlay */}
+          {/* ── Choosing word overlay — FULL LIST PICKER ─────────────────── */}
           {roomState.state === 'choosing_word' && (
-            <div className="absolute inset-0 bg-white/90 backdrop-blur-sm flex items-center justify-center z-10 px-4">
+            <div className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-10 p-2 sm:p-6">
               {isDrawer ? (
-                <div className="bg-white p-6 sm:p-8 rounded-2xl shadow-xl max-w-md w-full border border-slate-200">
-                  <h2 className="text-xl font-bold text-slate-800 mb-2 text-center">
-                    Sua vez de desenhar
-                  </h2>
-                  <p className="text-slate-500 mb-5 text-center text-sm">
-                    Busque um hidrocarboneto para desenhar. Não há limite de tempo para escolher.
-                  </p>
-                  <div className="relative">
-                    <input
-                      type="text"
-                      value={wordSearch}
-                      onChange={(e) => handleWordSearch(e.target.value)}
-                      placeholder="Busque por nome..."
-                      autoFocus
-                      className="w-full px-4 py-3 border-2 border-indigo-100 rounded-xl focus:border-indigo-500 focus:ring-0 outline-none text-base"
-                    />
-                    {wordSuggestions.length > 0 && (
-                      <ul className="absolute top-full left-0 right-0 mt-2 bg-white border border-slate-200 rounded-xl shadow-lg max-h-64 overflow-y-auto z-30">
-                        {wordSuggestions.map((suggestion, index) => (
-                          <li key={`${suggestion.name}-${index}`}>
-                            <button
-                              onMouseEnter={() => setPreviewWord(suggestion)}
-                              onFocus={() => setPreviewWord(suggestion)}
-                              onClick={() => {
-                                setPreviewWord(suggestion);
-                                setWordSuggestions([]);
-                                selectWord(suggestion);
-                              }}
-                              className="w-full text-left px-4 py-3 hover:bg-indigo-50 border-b border-slate-100 last:border-0 transition-colors"
-                            >
-                              <span className="font-bold text-slate-800 block">{suggestion.name}</span>
-                              <span className="text-xs text-slate-500">
-                                {suggestion.type} · C{suggestion.carbons}
-                              </span>
-                            </button>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
+                <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl flex flex-col max-h-[96dvh] overflow-hidden">
+                  {/* Modal header */}
+                  <div className="p-4 border-b border-slate-100 shrink-0 bg-indigo-600 text-white rounded-t-2xl">
+                    <h2 className="text-lg font-bold text-center">Escolha a molécula para desenhar</h2>
+                    <p className="text-xs text-indigo-200 text-center mt-0.5">
+                      Veja a estrutura e toque para confirmar
+                    </p>
+                  </div>
+
+                  {/* Body */}
+                  <div className="flex flex-1 overflow-hidden">
+
+                    {/* Left: search + grouped card grid */}
+                    <div className="flex-1 flex flex-col overflow-hidden">
+                      {/* Search bar */}
+                      <div className="px-4 py-3 border-b border-slate-100 shrink-0">
+                        <div className="relative">
+                          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                          <input
+                            type="text"
+                            value={listSearch}
+                            onChange={(e) => setListSearch(e.target.value)}
+                            placeholder="Filtrar por nome..."
+                            autoFocus
+                            className="w-full pl-8 pr-4 py-2 text-sm border border-slate-200 rounded-xl focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 outline-none bg-slate-50"
+                          />
+                        </div>
+                        {listSearch && (
+                          <p className="text-xs text-slate-400 mt-1 pl-1">
+                            {Object.values(filteredByType).reduce((s, arr) => s + arr.length, 0)} resultado(s)
+                          </p>
+                        )}
+                      </div>
+
+                      {/* Grouped card grid (scrollable) */}
+                      <div className="flex-1 overflow-y-auto px-3 py-3 space-y-4">
+                        {Object.keys(filteredByType).length === 0 && (
+                          <p className="text-sm text-slate-400 text-center py-8">
+                            Nenhum resultado encontrado.
+                          </p>
+                        )}
+
+                        {TYPE_ORDER.filter((t) => filteredByType[t]).map((type) => {
+                          const isCollapsed = collapsedTypes[type];
+                          return (
+                            <div key={type}>
+                              {/* Group header (collapsible) */}
+                              <button
+                                className="w-full flex items-center justify-between px-2 py-1.5 rounded-xl hover:bg-slate-100 transition-colors mb-2"
+                                onClick={() => toggleType(type)}
+                              >
+                                <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                                  {TYPE_LABELS[type]} ({filteredByType[type].length})
+                                </span>
+                                {isCollapsed ? (
+                                  <ChevronDown size={14} className="text-slate-400" />
+                                ) : (
+                                  <ChevronUp size={14} className="text-slate-400" />
+                                )}
+                              </button>
+
+                              {/* Card grid */}
+                              {!isCollapsed && (
+                                <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+                                  {filteredByType[type].map((mol) => (
+                                    <MoleculeCard
+                                      key={mol.name}
+                                      mol={mol as Hydrocarbon}
+                                      isSelected={selectedMol?.name === mol.name}
+                                      onHover={() => setHoveredMol(mol as Hydrocarbon)}
+                                      onSelect={() => {
+                                        setSelectedMol(mol as Hydrocarbon);
+                                        setPreviewWord(mol as Hydrocarbon);
+                                        selectWord(mol);
+                                      }}
+                                    />
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Right: large preview panel (desktop only) */}
+                    <div className="hidden md:flex w-52 shrink-0 border-l border-slate-100 flex-col items-center justify-center p-4 bg-slate-50 gap-3">
+                      {hoveredMol ? (
+                        <>
+                          <div className="text-center">
+                            <p className="text-sm font-bold text-slate-800 break-words text-center">
+                              {hoveredMol.name}
+                            </p>
+                            <p className="text-[11px] text-slate-400">
+                              {TYPE_LABELS[hoveredMol.type]} · C{hoveredMol.carbons}
+                            </p>
+                          </div>
+                          <div className="rounded-xl bg-white border border-slate-200 p-2 w-full">
+                            <svg
+                              id="side-preview-svg"
+                              ref={sidePreviewRef}
+                              width={160}
+                              height={120}
+                              className="w-full h-[110px]"
+                            />
+                          </div>
+                          {sidePreviewError && (
+                            <p className="text-[9px] text-amber-600 text-center">{hoveredMol.smiles}</p>
+                          )}
+                          <p className="text-[10px] text-indigo-500 font-semibold text-center mt-1">
+                            Toque para selecionar
+                          </p>
+                        </>
+                      ) : (
+                        <div className="text-center">
+                          <div className="text-4xl mb-3">🧪</div>
+                          <p className="text-xs text-slate-400">
+                            Passe o mouse sobre uma molécula para ver a estrutura
+                          </p>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               ) : (
                 <div className="text-center px-6">
-                  <h2 className="text-2xl font-bold text-slate-800 mb-2">Aguarde</h2>
-                  <p className="text-slate-500">O desenhista está escolhendo a molécula.</p>
+                  <div className="bg-white rounded-2xl px-8 py-6 shadow-xl">
+                    <div className="text-4xl mb-3">⏳</div>
+                    <h2 className="text-2xl font-bold text-slate-800 mb-2">Aguarde</h2>
+                    <p className="text-slate-500">O desenhista está escolhendo a molécula.</p>
+                  </div>
                 </div>
               )}
             </div>
           )}
 
-          {/* Round end overlay */}
+          {/* ── Round end overlay ────────────────────────────────────────── */}
           {roomState.state === 'round_end' && (
             <div className="absolute inset-0 bg-white/90 backdrop-blur-sm flex items-center justify-center z-10 px-4">
               <div className="bg-white p-8 rounded-2xl shadow-xl max-w-md w-full border border-slate-200 text-center">
@@ -594,7 +810,7 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
             </div>
           )}
 
-          {/* Game over overlay */}
+          {/* ── Game over overlay ─────────────────────────────────────────── */}
           {roomState.state === 'game_over' && (
             <div className="absolute inset-0 bg-white/90 backdrop-blur-sm flex items-center justify-center z-10 px-4">
               <div className="bg-white p-6 sm:p-8 rounded-2xl shadow-xl max-w-md w-full border border-slate-200 text-center">
@@ -604,7 +820,9 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
                     <div
                       key={player.id}
                       className={`flex justify-between items-center p-3 rounded-xl ${
-                        index === 0 ? 'bg-amber-50 border border-amber-200' : 'bg-slate-50'
+                        index === 0
+                          ? 'bg-amber-50 border border-amber-200'
+                          : 'bg-slate-50'
                       }`}
                     >
                       <span className="font-bold text-slate-700 truncate pr-4">
@@ -619,7 +837,7 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
             </div>
           )}
 
-          {/* Drawer indicator */}
+          {/* ── Drawer indicator ─────────────────────────────────────────── */}
           {currentDrawerPlayer && roomState.state === 'playing' && (
             <div className="absolute top-3 right-3 bg-indigo-100 text-indigo-700 px-3 py-1.5 rounded-full text-xs font-bold flex items-center gap-1.5 z-20 max-w-[60%]">
               <Pencil size={12} />
@@ -630,7 +848,7 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
           )}
         </div>
 
-        {/* Drawing toolbar */}
+        {/* ── Drawing toolbar ───────────────────────────────────────────────── */}
         {isDrawer && roomState.state === 'playing' && (
           <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-20 w-[min(96vw,600px)]">
             <div className="bg-white border border-slate-200 rounded-2xl shadow-xl p-2 flex items-center gap-1 sm:gap-2 overflow-x-auto">
@@ -679,7 +897,7 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
           </div>
         )}
 
-        {/* Chat / Guess panel */}
+        {/* ── Chat / Guess panel ────────────────────────────────────────────── */}
         <AnimatePresence>
           {showChatPanel && (
             <motion.aside
@@ -691,7 +909,7 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
             >
               {/* Chat header */}
               <div className="p-3 border-b border-slate-200 flex justify-between items-center bg-slate-50 shrink-0">
-                <h3 className="font-bold text-slate-800 text-sm">Chat & Palpites</h3>
+                <h3 className="font-bold text-slate-800 text-sm">Chat &amp; Palpites</h3>
                 <button
                   className="md:hidden p-2 text-slate-500 hover:bg-slate-200 rounded-lg"
                   onClick={() => setChatOpen(false)}
@@ -701,7 +919,7 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
                 </button>
               </div>
 
-              {/* Players score bar (mobile) */}
+              {/* Players score bar */}
               <div className="flex gap-1 px-3 py-2 overflow-x-auto shrink-0 border-b border-slate-100 bg-white">
                 {[...(roomState.players ?? [])]
                   .sort((a: any, b: any) => b.score - a.score)
@@ -709,7 +927,9 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
                     <div
                       key={p.id}
                       className={`flex flex-col items-center px-2 py-1 rounded-lg shrink-0 text-center min-w-[52px] ${
-                        p.hasGuessed ? 'bg-emerald-50 border border-emerald-200' : 'bg-slate-50 border border-slate-200'
+                        p.hasGuessed
+                          ? 'bg-emerald-50 border border-emerald-200'
+                          : 'bg-slate-50 border border-slate-200'
                       }`}
                     >
                       <span className="text-[11px] font-semibold text-slate-700 truncate max-w-[56px]">
@@ -758,7 +978,7 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
                       className="w-full px-4 py-3 bg-white border border-slate-300 rounded-xl focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 outline-none text-base"
                     />
 
-                    {/* ── MOBILE FIX: tapping a suggestion sends immediately ── */}
+                    {/* Mobile: tapping a suggestion sends immediately */}
                     {suggestions.length > 0 && (
                       <ul className="absolute bottom-full left-0 right-0 mb-2 bg-white border border-slate-200 rounded-xl shadow-xl max-h-52 overflow-y-auto z-40">
                         {suggestions.map((suggestion, index) => (
@@ -766,7 +986,6 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
                             <button
                               type="button"
                               onMouseDown={(e) => {
-                                // Use onMouseDown to fire before input blur
                                 e.preventDefault();
                                 submitGuessFromSuggestion(suggestion.name);
                               }}
