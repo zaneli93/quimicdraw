@@ -4,7 +4,7 @@ import next from 'next';
 import { Server } from 'socket.io';
 
 const dev = process.env.NODE_ENV !== 'production';
-const hostname = 'localhost';
+const hostname = '0.0.0.0';
 const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 const app = next({ dev, hostname, port });

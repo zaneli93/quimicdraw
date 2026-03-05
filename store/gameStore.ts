@@ -34,10 +34,11 @@ export const useGameStore = create<GameState>((set, get) => ({
       return;
     }
     
-    // In production, this would be the actual URL
-    const socketUrl = process.env.NEXT_PUBLIC_APP_URL || '';
+    // Connect to the same host (works locally and in production)
+    const socketUrl = typeof window !== 'undefined' ? window.location.origin : '';
     const socket = io(socketUrl, {
       path: '/socket.io',
+      transports: ['websocket', 'polling'],
     });
 
     socket.on('connect', () => {
