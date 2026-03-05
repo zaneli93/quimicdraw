@@ -16,6 +16,7 @@ interface GameState {
   draw: (data: any) => void;
   clearCanvas: () => void;
   kickPlayer: (playerId: string) => void;
+  setDrawer: (playerId: string) => void;
 }
 
 export const useGameStore = create<GameState>((set, get) => ({
@@ -87,6 +88,12 @@ export const useGameStore = create<GameState>((set, get) => ({
       window.location.href = '/';
     });
 
+    socket.on('waiting_for_drawer', () => {
+      set((state) => ({
+        roomState: { ...state.roomState, state: 'choosing_word', currentDrawer: null }
+      }));
+    });
+
     set({ socket, roomId, playerName, isHost });
   },
 
@@ -144,5 +151,12 @@ export const useGameStore = create<GameState>((set, get) => ({
     if (socket && roomId) {
       socket.emit('kick_player', { roomId, playerId });
     }
-  }
+  },
+
+  setDrawer: (playerId) => {
+    const { socket, roomId } = get();
+    if (socket && roomId) {
+      socket.emit('set_drawer', { roomId, playerId });
+    }
+  },
 }));

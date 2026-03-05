@@ -53,6 +53,8 @@ app.prepare().then(() => {
         roundEndTime: null,
         drawHistory: [],
         chatHistory: [],
+        drawerMode: settings?.drawerMode || 'roundrobin', // roundrobin | random | host
+        usedDrawerIds: [], // track who has already drawn (for random without repetition)
       };
       rooms.set(roomId, newRoom);
       socket.join(roomId);
@@ -139,8 +141,20 @@ app.prepare().then(() => {
       const room = rooms.get(roomId);
       if (room && room.hostId === socket.id && room.state === 'waiting') {
         room.settings = { ...room.settings, ...settings };
+        if (settings.drawerMode !== undefined) room.drawerMode = settings.drawerMode;
         io.to(roomId).emit('room_updated', room);
       }
+    });
+
+    // Host manually picks the drawer
+    socket.on('set_drawer', ({ roomId, playerId }) => {
+      const room = rooms.get(roomId);
+      if (!room || room.hostId !== socket.id) return;
+      if (room.state !== 'choosing_word') return;
+      room.currentDrawer = playerId;
+      room.currentWord = null;
+      io.to(roomId).emit('room_updated', room);
+      io.to(roomId).emit('choosing_word', { drawer: room.currentDrawer });
     });
 
     socket.on('draw', ({ roomId, data }) => {
@@ -256,15 +270,40 @@ app.prepare().then(() => {
       room.drawHistory = [];
       room.players.forEach((p: any) => p.hasGuessed = false);
       
-      // Select next drawer (simple round-robin based on round number)
-      const drawerIndex = (room.currentRound - 1) % room.players.length;
-      room.currentDrawer = room.players[drawerIndex].id;
+      // Select next drawer based on drawerMode
+      const mode = room.drawerMode || 'roundrobin';
+
+      if (mode === 'host') {
+        // Host will pick manually — set drawer as null and wait for set_drawer event
+        room.currentDrawer = null;
+      } else if (mode === 'random') {
+        // Random without repetition — reset when everyone has drawn
+        const available = room.players.filter((p: any) => !room.usedDrawerIds.includes(p.id));
+        if (available.length === 0) {
+          room.usedDrawerIds = [];
+          const all = room.players;
+          room.currentDrawer = all[Math.floor(Math.random() * all.length)].id;
+        } else {
+          room.currentDrawer = available[Math.floor(Math.random() * available.length)].id;
+        }
+        room.usedDrawerIds.push(room.currentDrawer);
+      } else {
+        // roundrobin (default)
+        const drawerIndex = (room.currentRound - 1) % room.players.length;
+        room.currentDrawer = room.players[drawerIndex].id;
+      }
       room.currentWord = null;
 
       io.to(roomId).emit('room_updated', room);
       io.to(roomId).emit('clear_canvas');
-      io.to(roomId).emit('choosing_word', { drawer: room.currentDrawer });
-      
+
+      if (room.currentDrawer) {
+        io.to(roomId).emit('choosing_word', { drawer: room.currentDrawer });
+      } else {
+        // Host mode: waiting for professor to pick drawer
+        io.to(roomId).emit('waiting_for_drawer');
+      }
+
       // No timeout while choosing a word.
       // The drawer can take as long as needed before the round timer starts.
     }
